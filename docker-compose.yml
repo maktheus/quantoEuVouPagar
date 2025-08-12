@@ -1,0 +1,148 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:16.3
+    container_name: quanto-eu-vou-pagar-db
+    environment:
+      POSTGRES_DB: ${DB_NAME}
+      POSTGRES_USER: ${DB_USER}
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    networks:
+      - backend 
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./scripts/init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./backups:/backups # Volume para armazenar backups
+    ports:
+      - "5432:5432"
+
+  app:
+    build: .
+    container_name: quanto-eu-vou-pagar-app
+    networks:
+      - backend
+    depends_on:
+      - db
+    environment:
+      - ENV=production
+      - SERVER_PORT=${SERVER_PORT}
+      - DB_HOST=${DB_HOST}
+      - DB_PORT=${DB_PORT}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+      - DB_NAME=${DB_NAME}
+      - JWT_SECRET_KEY=${JWT_SECRET_KEY}
+    env_file:
+      - .env.production
+    logging:
+      driver: "fluentd"
+      options:
+        fluentd-address: localhost:24224
+        tag: quanto-eu-vou-pagar.app
+
+  nginx:
+    image: nginx:alpine
+    container_name: quanto-eu-vou-pagar-nginx
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf
+    networks:
+      - backend
+    depends_on:
+      - app
+    logging:
+      driver: "fluentd"
+      options:
+        fluentd-address: localhost:24224
+        tag: quanto-eu-vou-pagar.nginx
+
+  backup:
+    image: postgres:16.3
+    container_name: quanto-eu-vou-pagar-backup
+    networks:
+      - backend
+    volumes:
+      - ./scripts/backup.sh:/backup.sh
+      - ./backups:/backups # Volume para armazenar backups
+    environment:
+      - DB_HOST=db
+      - DB_PORT=5432
+      - DB_NAME=${DB_NAME}
+      - DB_USER=${DB_USER}
+      - DB_PASSWORD=${DB_PASSWORD}
+    command: >
+      sh -c "
+      chmod +x /backup.sh &&
+      crontab -l | { cat; echo '0 2 * * * /backup.sh'; } | crontab - &&
+      crond -f -l 8
+      "
+    depends_on:
+      - db
+    logging:
+      driver: "fluentd"
+      options:
+        fluentd-address: localhost:24224
+        tag: quanto-eu-vou-pagar.backup
+
+  prometheus:
+    image: prom/prometheus
+    container_name: quanto-eu-vou-pagar-prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - backend
+    depends_on:
+      - app
+    logging:
+      driver: "fluentd"
+      options:
+        fluentd-address: localhost:24224
+        tag: quanto-eu-vou-pagar.prometheus
+
+  grafana:
+    image: grafana/grafana
+    container_name: quanto-eu-vou-pagar-grafana
+    ports:
+      - "3000:3000"
+    networks:
+      - backend
+    depends_on:
+      - prometheus
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=admin # Senha padrão para o usuário admin do Grafana
+    logging:
+      driver: "fluentd"
+      options:
+        fluentd-address: localhost:24224
+        tag: quanto-eu-vou-pagar.grafana
+
+  fluentd:
+    image: fluent/fluentd:v1.12-debian-1
+    container_name: quanto-eu-vou-pagar-fluentd
+    volumes:
+      - ./fluentd.conf:/fluentd/etc/fluent.conf
+      - ./logs:/fluentd/log
+    ports:
+      - "24224:24224"
+      - "24224:24224/udp"
+    networks:
+      - backend
+    depends_on:
+      - app
+      - nginx
+      - backup
+      - prometheus
+      - grafana
+
+volumes:
+  db-data:
+  backups:
+  logs:
+
+networks:
+  backend:
+    driver: bridge
